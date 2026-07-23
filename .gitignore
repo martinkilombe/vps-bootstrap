@@ -1,0 +1,11 @@
+# This repo is meant to stay fully generic — no secrets, no real
+# IPs/hostnames, no per-box inventory files. Guard against accidentally
+# committing anything like that.
+*.env
+.env.*
+*inventory*
+*hosts.ini
+*.pem
+*.key
+id_*
+!id_*.pub
