@@ -96,8 +96,30 @@ adduser <USER>              # set a strong password when prompted
 usermod -aG sudo <USER>
 ```
 
-Decide **now**, deliberately, whether this user gets NOPASSWD sudo
-(`echo "<USER> ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/<USER>-nopasswd && visudo -c`).
+Decide **now**, deliberately, whether this user gets NOPASSWD sudo.
+If yes, install the rule like this — **validate first, then move it into
+place**, never the other way around:
+
+```sh
+echo "<USER> ALL=(ALL) NOPASSWD: ALL" > /tmp/nopasswd
+sudo visudo -c -f /tmp/nopasswd          # must print "parsed OK"
+sudo install -m 0440 -o root -g root /tmp/nopasswd /etc/sudoers.d/<USER>-nopasswd
+rm /tmp/nopasswd
+sudo visudo -c                            # re-check the whole ruleset
+```
+
+> **Why not the obvious `tee` one-liner.** Writing straight into
+> `/etc/sudoers.d/` and validating afterwards means a malformed line is
+> already live by the time you find out. sudo refuses to run *at all*
+> when any file in `sudoers.d` fails to parse — not just the broken
+> rule, the whole thing — so a typo here costs you sudo entirely. On a
+> box where Phase 3 has just disabled root SSH login, that leaves the
+> provider's console (Phase 0) as the only way back in. `visudo -c -f`
+> on a temp file makes the mistake unreachable instead of recoverable.
+> The `-m 0440` matters too: sudo ignores files in `sudoers.d` that are
+> group- or world-writable, so a rule installed with `tee`'s default
+> mode can silently not apply.
+
 This is a real convenience-vs-friction tradeoff, not a default to copy
 without thinking — NOPASSWD sudo means anyone with SSH key access to
 this account has unconfirmed root. Fine for a single-admin hobby/small
@@ -141,8 +163,16 @@ exit
 anything else**:
 
 ```sh
-ssh -i ~/.ssh/<key> <USER>@<VPS_IP>
+ssh -o IdentitiesOnly=yes -i ~/.ssh/<key> <USER>@<VPS_IP>
 ```
+
+> **`-i` alone does not test the key you think it does.** It *adds* an
+> identity; it doesn't restrict ssh to it. Any keys in your agent are
+> still offered, usually first — so this can succeed via a completely
+> different key while you record "the new key works", and you find out
+> otherwise only after password auth is off. `IdentitiesOnly=yes`
+> restricts the attempt to the `-i` key, which is the thing actually
+> being verified. Use it on every key check in this phase.
 
 Don't proceed to 3.3 until this succeeds and you still have your
 original root/cloud-init session open as a fallback.
@@ -195,9 +225,18 @@ Then check at the protocol level — what the daemon actually offers a
 connecting client, independent of config-parsing reasoning:
 
 ```sh
-ssh -v -o BatchMode=yes -o PreferredAuthentications=password <USER>@<VPS_IP> exit 2>&1 \
+ssh -v -o BatchMode=yes -o PubkeyAuthentication=no \
+    -o PreferredAuthentications=password <USER>@<VPS_IP> exit 2>&1 \
   | grep "Authentications that can continue"
 ```
+
+`PubkeyAuthentication=no` is what makes this deterministic: without it,
+ssh falls back to an agent key, *succeeds*, and you get a login instead
+of the server's method list — a pass and a not-actually-run check look
+identical. Disabling pubkey leaves password as the only method the
+client will attempt, so the server is forced to answer with what it
+accepts. Expect the connection to fail; the `grep` output is the result,
+not the exit code.
 
 This should show only `publickey`. If it still shows `password` in the
 list, the override problem above is happening — check `sshd -T` against
@@ -207,8 +246,8 @@ Also confirm key login still works and root login is refused, each from
 a **fresh** connection:
 
 ```sh
-ssh -i ~/.ssh/<key> <USER>@<VPS_IP>            # should succeed
-ssh root@<VPS_IP>                              # should be refused
+ssh -o IdentitiesOnly=yes -i ~/.ssh/<key> <USER>@<VPS_IP>   # should succeed
+ssh root@<VPS_IP>                                           # should be refused
 ```
 
 **3.5 — Lock out any unused default account** (e.g. cloud-init's
@@ -233,13 +272,21 @@ sudo rm -f /home/ubuntu/.ssh/authorized_keys
 Verify — key auth, not just password auth, must fail:
 
 ```sh
-ssh -o PreferredAuthentications=publickey -o PubkeyAuthentication=yes ubuntu@<VPS_IP>
+ssh -o IdentitiesOnly=yes -i ~/.ssh/<key-you-gave-the-provider> \
+    -o PreferredAuthentications=publickey ubuntu@<VPS_IP>
 ```
-Should be refused. A plain `ssh ubuntu@<VPS_IP>` alone isn't a strong
-enough check here, since with password auth already off globally
-(3.3), it would *look* refused either way — this needs to specifically
-attempt key auth to prove the removed `authorized_keys` is what's
-stopping it.
+Should be refused. Two things this needs to get right:
+
+- A plain `ssh ubuntu@<VPS_IP>` isn't a strong enough check, since with
+  password auth already off globally (3.3) it would *look* refused
+  either way. It has to specifically attempt **key** auth to prove the
+  removed `authorized_keys` is what's stopping it.
+- It has to offer **the key cloud-init actually installed** — normally
+  the one you pasted into the provider's panel when creating the VPS.
+  Without `-i` and `IdentitiesOnly=yes`, this offers whatever your agent
+  happens to hold; if that doesn't include the provider's key, the
+  attempt is refused for the wrong reason and proves nothing. That is a
+  vacuous pass, and it's indistinguishable from a real one.
 
 **3.6 — Back up the key** using the gopass base64 pattern from Phase 0,
 or your password manager's file-attachment feature. Verify the backup by
@@ -796,8 +843,10 @@ sudo reboot
 - [ ] Root SSH login refused, from a fresh connection
 - [ ] Any unused default cloud-init account has **both** password
       locked *and* its own `authorized_keys` removed — `passwd -l`
-      alone does not stop key-based login, verified with an explicit
-      `PreferredAuthentications=publickey` attempt (Phase 3.5)
+      alone does not stop key-based login, verified by an explicit key
+      attempt offering **the provider's own key**, with
+      `IdentitiesOnly=yes` so it can't pass for the wrong reason
+      (Phase 3.5)
 - [ ] `sudo ufw status verbose` shows default-deny + only the intended
       ports
 - [ ] `fail2ban-client status sshd` shows the jail active
