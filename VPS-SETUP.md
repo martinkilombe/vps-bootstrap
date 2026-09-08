@@ -269,10 +269,14 @@ sudo fallocate -l 2G /swapfile
 sudo chmod 600 /swapfile
 sudo mkswap /swapfile
 sudo swapon /swapfile
-echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
-echo 'vm.swappiness=10' | sudo tee -a /etc/sysctl.conf
+grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+grep -q 'vm.swappiness' /etc/sysctl.conf || echo 'vm.swappiness=10' | sudo tee -a /etc/sysctl.conf
 sudo sysctl -p
 ```
+
+The two `grep -q ... ||` guards matter if you ever re-run this block — a
+bare `tee -a` appends a duplicate `/swapfile` line to `/etc/fstab` every
+time, and a box with the same swapfile listed twice fails to boot cleanly.
 
 **Verify**:
 
