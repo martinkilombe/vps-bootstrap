@@ -24,6 +24,32 @@ back into this repo.
   verifying multiline secrets actually round-trip correctly.
 - If you plan to gate any admin UI (Portainer, monitoring, etc.) behind
   it: a Tailscale account, and the box will need to join that tailnet.
+- **A working out-of-band console for this box, tested before you start.**
+  See below — this is the one prerequisite people skip and regret.
+
+**Find and test the provider's console now, while nothing can go wrong.**
+Every provider ships some form of out-of-band access that doesn't go
+through sshd — Contabo's VNC console, Oracle Cloud's serial console,
+Hetzner's, DigitalOcean's "Recovery Console", etc. Open it and log in
+through it *before* Phase 3 changes anything:
+
+- Locate it in the provider's web panel and note where it lives.
+- Log in through it with the root/cloud-init password. If you don't have
+  a password for any account (some images are key-only from the start),
+  **set one now** (`passwd <USER>`) — a console you can reach but can't
+  log into is not a fallback. Store it in your password manager.
+- Confirm you actually get a shell prompt, not just a blank framebuffer.
+
+Why this is a hard prerequisite rather than a nice-to-have: Phase 3's
+stated safety net is "keep your original SSH session open as a
+fallback." That session is not a fallback — it dies when your laptop
+sleeps, your network flaps, or a `ClientAliveInterval` times it out, and
+it can die *between* the step that broke sshd and the step where you'd
+have noticed. A tested console is the only fallback that's still there
+after sshd stops accepting you. Some providers' consoles also need a
+one-time setup step (Oracle's serial console needs an SSH key registered
+with the console service itself) — that step is impossible to complete
+from a box you can no longer reach.
 
 **Secrets convention used in this doc**: real secrets (sudo passwords,
 API tokens, SSH private keys) are never written into files that get
@@ -93,6 +119,13 @@ This is the highest-blast-radius phase in this whole doc. Do not
 collapse these steps into one unattended action, and do not disable
 password auth until key auth is independently confirmed working from a
 **separate** connection.
+
+**Before starting: confirm the provider's out-of-band console still
+works** (Phase 0). Keeping your existing SSH session open is a
+convenience, not a safety net — it can disappear on its own at any
+point, including partway through this phase. The console is what you
+fall back to if sshd stops letting you in, and it's worth re-checking
+here rather than discovering it never worked at the moment you need it.
 
 **3.1 — Add your public key**
 
@@ -422,12 +455,43 @@ sudo tailscale up
 
 Follow the printed auth URL to add this box to your tailnet.
 
+**Then disable key expiry for this node — don't skip this.** In the
+Tailscale admin console, find this machine, open its `...` menu, and
+choose **Disable key expiry**.
+
+> Tailscale node keys expire on a fixed schedule (180 days by default).
+> When the key on a *laptop* expires you get a browser prompt and
+> re-authenticate in seconds. When it expires on an unattended **server**
+> the box simply drops off the tailnet, and nothing prompts anybody —
+> the first symptom is that everything stops working at once, months
+> after this runbook was followed and with no recent change to blame.
+>
+> That failure is much worse here than it sounds, because Phases 7 and 8
+> bind Portainer and the monitoring hub *exclusively* to the Tailscale
+> IP. When the node key expires, every admin UI on this box becomes
+> unreachable simultaneously — and so does the monitoring that would
+> have told you something was wrong. You'd still have public-IP SSH (the
+> box is otherwise fine), so this is a lockout from your admin surface,
+> not from the box; recovery is re-running `sudo tailscale up` over SSH.
+> Disabling expiry up front avoids the whole episode.
+>
+> The tradeoff is real but small: a non-expiring key means a
+> compromised server stays on your tailnet until you explicitly remove
+> the node. For an unattended server whose admin access depends on that
+> key, that's the right side of the trade — and revoking the node from
+> the admin console is immediate when you do need it.
+
 **Verify**:
 
 ```sh
 tailscale status              # shows this box + others on the tailnet
 tailscale ip -4                # note this — it's <TAILSCALE_IP> for later phases
 ```
+
+Confirm in the admin console that this machine shows **no expiry date**
+against it. `tailscale status` will not tell you this — it reports the
+node as connected right up until the moment the key expires, so the
+admin console is the only place this is actually verifiable.
 
 From another device already on the tailnet, confirm you can reach this
 box's Tailscale IP and that the **public** IP does *not* expose whatever
@@ -462,6 +526,20 @@ Binding `-p <TAILSCALE_IP>:9443:9443` (a specific interface IP, not a
 bare port) is what actually restricts reachability — see the Docker/ufw
 note in Phase 4. Do **not** publish this to `0.0.0.0` or a bare
 `-p 9443:9443`.
+
+> **This binding is why the box has to be rebooted and re-verified
+> (Phase 10).** Publishing to a specific IP requires that IP to exist at
+> the moment the container starts. On boot, Docker can come up before
+> Tailscale has brought up its interface and assigned the address — the
+> container then dies with `cannot assign requested address`, and
+> `--restart=always` retries it into a crash-loop. It works perfectly
+> when you start it by hand (Tailscale is already up) and fails only
+> after a reboot, which is exactly the kind of bug that surfaces months
+> later during an unrelated outage. If you hit it, make the unit wait on
+> Tailscale (a `systemd` drop-in ordering `docker.service` after
+> `tailscaled.service` is the usual fix) rather than falling back to a
+> bare `-p 9443:9443`, which would silently publish the admin UI to the
+> public internet.
 
 Note the raw `/var/run/docker.sock` mount here — unlike the
 socket-proxy pattern in Phase 8, Portainer legitimately needs full
@@ -695,6 +773,23 @@ fresh session produces a real ANSI clear rather than an error.
 Don't consider the box finished until every one of these has actually
 been run and its output checked, not just "steps completed":
 
+**Reboot the box once, then run this whole checklist against the
+rebooted box.** Every verification in the phases above tests *live*
+state — what's running right now, most of it started by hand minutes
+earlier. None of it tests *persisted* state, and those are different
+things. A box can pass every phase check and still come up wrong:
+swap active but never written to `/etc/fstab`, Docker running but not
+`enabled`, ufw rules loaded but not persisted, a container bound to a
+Tailscale IP that doesn't exist yet at boot (Phase 7). The reboot is
+what turns "I configured it" into "it is configured", and it costs
+thirty seconds now versus discovering it during an unplanned reboot
+later, when you are already dealing with something else.
+
+```sh
+sudo reboot
+# wait, reconnect, then work down the list below
+```
+
 - [ ] `sudo sshd -T | grep -i passwordauthentication` → `no`
 - [ ] Protocol-level check confirms only `publickey` is offered (Phase
       3.4)
@@ -721,4 +816,14 @@ been run and its output checked, not just "steps completed":
 - [ ] Monitoring (if installed): a real test alert was received, and
       the notification-to-check link was verified directly (not just
       assumed from the UI)
-- [ ] Swapfile active (`swapon --show`)
+- [ ] Swapfile active (`swapon --show`) **and** present in
+      `/etc/fstab`, so it survives a reboot rather than only being on
+      right now
+- [ ] Tailscale (if used): key expiry is **disabled** for this node in
+      the admin console — verified there, not from `tailscale status`,
+      which reports the node healthy right up until the key expires
+- [ ] The whole list above was run against a **rebooted** box, not one
+      that has been up since you configured it
+- [ ] The provider's out-of-band console (Phase 0) still works and you
+      can still log in through it — re-checked after hardening, since
+      that's the fallback you'd need if any of the above ever breaks
