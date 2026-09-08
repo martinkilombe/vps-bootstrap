@@ -37,14 +37,16 @@ truth for that specific instance's live status.
 
 ## Contents
 
-- `VPS-SETUP.md` — the runbook itself.
-- `scripts/docker-install.sh` — Docker Engine install from the official
-  repo, including the GPG fingerprint verification step. Idempotent, safe
-  to re-run.
-- `scripts/base-hardening.sh` — `ufw` + `fail2ban` + swapfile. Idempotent,
-  safe to re-run. Deliberately does **not** touch SSH config — that stays
-  manual, see above. (Docker's own log rotation is handled inside
-  `docker-install.sh`, not this script.)
+`VPS-SETUP.md` — the runbook. That's the whole thing.
+
+There are deliberately **no setup scripts here.** Everything is commands
+you paste and read the output of, one block at a time. This is a one-time
+operation per box wrapping maybe twenty commands — not enough repetition
+to earn a script, and a script would work against the point: it bundles
+steps into a single unattended run and can exit 0 while having silently
+done the wrong thing, which is exactly the failure mode every
+verification step in here exists to catch. Nothing to clone onto the box
+either — you can read this on a phone and type into a terminal.
 
 ## Scope
 

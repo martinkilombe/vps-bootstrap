@@ -219,10 +219,6 @@ before (see Phase 0's gotcha).
 
 ## Phase 4 — Firewall + fail2ban + swapfile
 
-Use `scripts/base-hardening.sh` from this repo (pass any extra ports to
-open beyond 22, e.g. `./scripts/base-hardening.sh 80 443` for a box that
-will serve public HTTP/S), or run the equivalent manually:
-
 ```sh
 sudo apt install -y ufw fail2ban
 sudo ufw default deny incoming
@@ -287,39 +283,73 @@ sudo fail2ban-client status sshd
 swapon --show                # confirms swap active
 ```
 
-If you used `scripts/base-hardening.sh`, all three (ufw, fail2ban,
-swap) are covered by that one run — no need to also do this section
-manually. Running both is harmless (the script detects existing swap
-and skips it) but redundant.
+If `fail2ban-client status sshd` errors with something about the jail not
+existing while `systemctl status fail2ban` looks healthy, the jail failed
+to start (usually a log-backend mismatch) — the service being up is not
+evidence the jail is. Check `sudo journalctl -u fail2ban -n 50`.
 
 ---
 
 ## Phase 5 — Docker Engine
 
-Use `scripts/docker-install.sh` from this repo — it installs from
-Docker's official apt repo (following the method documented at
-docs.docker.com, not a third-party curl-pipe-bash script), prints the
-downloaded GPG key's fingerprint for you to independently check before
-trusting it, and sets log rotation automatically. It's idempotent, so
-safe to run even if Docker's already installed (it'll just fix up log
-rotation if that's missing).
+Install from Docker's official apt repository, following the method
+documented at <https://docs.docker.com/engine/install/ubuntu/> — not a
+third-party curl-pipe-bash script. Check that page as you go; if it has
+changed since this runbook was written, the page wins.
+
+Remove any conflicting distro-packaged Docker bits, then add the repo:
 
 ```sh
-./scripts/docker-install.sh
+for pkg in docker.io docker-doc docker-compose docker-compose-v2 \
+           podman-docker containerd runc; do
+  sudo apt-get remove -y "$pkg"
+done
+
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+```
+
+**Stop here and check the key before trusting it** — everything after
+this point is `apt install`ing whatever that key signs:
+
+```sh
+gpg --show-keys --with-fingerprint /etc/apt/keyrings/docker.asc
 ```
 
 > **On the fingerprint check**: as of when this doc was written,
 > Docker's own install page doesn't publish a fingerprint on that page
-> to diff against directly — the script prints what it downloaded and
-> tells you to check it, but you may need to cross-reference via a
-> second independent source (Docker's official GitHub org, etc.) rather
-> than a single page. Don't skip this step just because it's
-> inconvenient — a substituted key here means every `apt install
-> docker-ce` afterward trusts whatever the attacker signed.
+> to diff against directly — so cross-reference via a second
+> independent source (Docker's official GitHub org, or any other
+> unrelated source) rather than trusting a single download. Don't skip
+> this just because it's inconvenient — a substituted key here means
+> every `apt install docker-ce` afterward trusts whatever the attacker
+> signed.
 
-If running the equivalent manually instead of using the script, don't
-forget the log-rotation step — container logs can silently fill the
-disk without it:
+Only once the fingerprint checks out:
+
+```sh
+ARCH="$(dpkg --print-architecture)"
+CODENAME="$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")"
+sudo tee /etc/apt/sources.list.d/docker.sources >/dev/null <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: ${CODENAME}
+Components: stable
+Architectures: ${ARCH}
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io \
+  docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker
+```
+
+Set log rotation — container logs can silently fill the disk without it:
 
 ```sh
 sudo tee /etc/docker/daemon.json >/dev/null <<'EOF'
@@ -330,6 +360,11 @@ sudo tee /etc/docker/daemon.json >/dev/null <<'EOF'
 EOF
 sudo systemctl restart docker
 ```
+
+> If `/etc/docker/daemon.json` already exists with other settings in it,
+> **don't** paste the block above as-is — it replaces the whole file and
+> would silently drop them. Merge the two keys into the existing file
+> instead.
 
 Optionally add your user to the `docker` group for convenience (no
 sudo password needed for `docker` commands):
@@ -342,14 +377,18 @@ sudo usermod -aG docker <USER>
 > membership is root-equivalent (you can bind-mount `/` into a
 > container and do anything). It's a convenience step, not a security
 > boundary. Only add it if `<USER>` already has full sudo anyway.
+>
+> Group membership doesn't apply to your current shell — log out and
+> back in first, or the verify step below will fail on a
+> permission-denied socket. Use `sudo docker ...` until you have.
 
 **Verify**:
 
 ```sh
-docker run --rm hello-world
+sudo docker run --rm hello-world
 sudo systemctl is-enabled docker     # should say "enabled"
 cat /etc/docker/daemon.json          # confirm log rotation applied
-docker info | grep -A2 "Logging Driver"
+sudo docker info | grep -A2 "Logging Driver"
 ```
 
 ---
@@ -632,8 +671,7 @@ box, not a second independent one to watch it.
 
 ## Phase 9 — Housekeeping
 
-Swapfile is covered in Phase 4 (via `scripts/base-hardening.sh` or the
-manual commands there) — nothing further needed here.
+Swapfile is covered in Phase 4 — nothing further needed here.
 
 **Ghostty terminal support** (only relevant if you SSH from Ghostty —
 its terminfo entry isn't in stock Ubuntu, which breaks `clear`/`tput`/
